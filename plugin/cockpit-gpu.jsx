@@ -3275,7 +3275,7 @@ function ProcessesTable({ processes }) {
                             <td className="nvidia-process-table__mem">
                                 {row.usedMemoryMiB == null ? _('N/A') : `${safeFormatNumber(row.usedMemoryMiB)} MiB`}
                             </td>
-                            <td className="nvidia-process-table__cmd">{row.processName || _('Unknown process')}</td>
+                            <td className="nvidia-process-table__cmd" title={row.processName || _('Unknown process')}>{row.processName || _('Unknown process')}</td>
                         </tr>
                     ))}
                 </tbody>

@@ -625,8 +625,10 @@
 }
 
 .nvidia-process-table__cmd {
-  overflow-wrap: anywhere;
-  min-width: 18rem;
+  max-width: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .nvidia-process-list {
