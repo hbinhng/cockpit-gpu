@@ -115,9 +115,9 @@ const GPU_QUERY_FIELDS_EXT_TEMP_AMBIENT = [
     { field: 'temperature.ambient', key: 'temperatureAmbient' },
 ];
 
-const CHART_PURPLE_100 = '#c4b5fd';
-const CHART_PURPLE_200 = '#a855f7';
-const CHART_PURPLE_300 = '#8b5cf6';
+const CHART_PURPLE_100 = 'var(--nvidia-gpu-chart-purple-100)';
+const CHART_PURPLE_200 = 'var(--nvidia-gpu-chart-purple-200)';
+const CHART_PURPLE_300 = 'var(--nvidia-gpu-chart-purple-300)';
 
 const GPU_QUERY_FIELDS_ESSENTIAL = [
     { field: 'index', key: 'index' },
