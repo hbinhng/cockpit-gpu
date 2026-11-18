@@ -1,476 +1,169 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_NAME="$(basename "${0}")"
-DEFAULT_REPO_SLUG="binbinsh/cockpit-gpu"
-DEFAULT_REF="main"
-DEFAULT_PLUGIN_NAME="gpus"
-DEFAULT_COCKPIT_REPO_SLUG="cockpit-project/cockpit"
-DEFAULT_COCKPIT_REF="main"
-
-REPO_SLUG="${REPO_SLUG:-$DEFAULT_REPO_SLUG}"
-REF="${REF:-$DEFAULT_REF}"
-PLUGIN_NAME="${PLUGIN_NAME:-$DEFAULT_PLUGIN_NAME}"
-COCKPIT_REPO="${COCKPIT_REPO:-$DEFAULT_COCKPIT_REPO_SLUG}"
-COCKPIT_REF="${COCKPIT_REF:-$DEFAULT_COCKPIT_REF}"
-INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/share/cockpit/$PLUGIN_NAME}"
-FROM_LOCAL=""
-KEEP_WORKDIR=0
-PLUGIN_VERSION_INPUT="${PLUGIN_VERSION:-}"
-BUILT_DIST_DIR=""
-
+COCKPIT_TAG=372
+COCKPIT_SHA256=42fe04b8acc60594e9316077a565c795816d61442a3164ee585544e3f2eedea5
+REF=3cb1708ca7de2565d7adc844a6e5ad64a7ad6e25
+REPO=hbinhng/cockpit-gpu
+DIR=/usr/local/share/cockpit/gpus
+LIBEXEC=/usr/local/libexec/cockpit-gpu
+UNIT=/etc/systemd/system/cockpit-gpu-usage-collector.service
+STATE=/var/lib/cockpit/gpus
+BUILD_USER=${SUDO_USER:-}
+LOCAL=$(cd -- "$(dirname -- "$0")" && pwd -P)
+RESTART=0
+UNINSTALL=0
 usage() {
-  cat <<'USAGE'
-Usage:
-  install.sh [options]
-
-Options:
-  --repo <owner/repo>     GitHub repository slug (default: binbinsh/cockpit-gpu)
-  --ref <branch|tag|sha>  Git reference to install (default: main)
-  --cockpit-repo <slug>   Cockpit source repo for build fallback (default: cockpit-project/cockpit)
-  --cockpit-ref <ref>     Cockpit git ref for build fallback (default: main)
-  --dir <path>            Install path (default: ~/.local/share/cockpit/gpus)
-  --from-local <path>     Install from local repository path (skip download)
-  --plugin-name <name>    Cockpit manifest name/path (default: gpus)
-  --keep-workdir          Keep temporary working directory for debugging
-  -h, --help              Show this help
-
-Environment variables (optional):
-  REPO_SLUG, REF, COCKPIT_REPO, COCKPIT_REF, INSTALL_DIR, PLUGIN_NAME, PLUGIN_VERSION
-
-Examples:
-  curl -fsSL https://raw.githubusercontent.com/binbinsh/cockpit-gpu/main/install.sh | bash
-  curl -fsSL https://raw.githubusercontent.com/binbinsh/cockpit-gpu/main/install.sh | bash -s -- --ref v1.0.0
-  ./install.sh --from-local /path/to/cockpit-gpu
-USAGE
+  cat <<'HELP'
+Usage: sudo ./install.sh [--build-user USER] [--dir PATH] [--ref COMMIT] [--repo OWNER/REPO] [--restart-cockpit] [--uninstall]
+Installs from this local checkout; --ref downloads the specified immutable commit.
+--dir selects a root-owned plugin directory. Use the same --dir for uninstall.
+--restart-cockpit restarts existing Cockpit units after install/uninstall.
+--uninstall removes the plugin, collector, service, account and usage data.
+HELP
 }
-
-normalize_plugin_version() {
-  local input="$1"
-  local version="${input#V}"
-  version="${version#v}"
-  version="${version#.}"
-
-  if [[ "$version" =~ ^[0-9]{2}\.[0-9]{4}\.[0-9]{4}$ ]]; then
-    echo "$version"
-    return 0
-  fi
-
-  if [[ -n "$input" ]]; then
-    echo "WARN: invalid PLUGIN_VERSION '$input', fallback to current time" >&2
-  fi
-  date +%y.%m%d.%H%M
-}
-
-while [[ $# -gt 0 ]]; do
+while (($#)); do
   case "$1" in
-    --repo)
-      REPO_SLUG="$2"
-      shift 2
-      ;;
-    --ref)
-      REF="$2"
-      shift 2
-      ;;
-    --cockpit-repo)
-      COCKPIT_REPO="$2"
-      shift 2
-      ;;
-    --cockpit-ref)
-      COCKPIT_REF="$2"
-      shift 2
-      ;;
-    --dir)
-      INSTALL_DIR="$2"
-      shift 2
-      ;;
-    --from-local)
-      FROM_LOCAL="$2"
-      shift 2
-      ;;
-    --plugin-name)
-      PLUGIN_NAME="$2"
-      shift 2
-      ;;
-    --keep-workdir)
-      KEEP_WORKDIR=1
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "ERROR: unknown argument: $1" >&2
-      usage
-      exit 2
-      ;;
+    --build-user|--dir|--ref|--repo)
+      (($# >= 2)) || { echo "Missing value for $1" >&2; exit 2; }
+      case "$1" in
+        --build-user) BUILD_USER=$2;;
+        --dir) DIR=$2;;
+        --ref) REF=$2; LOCAL=;;
+        --repo) REPO=$2;;
+      esac
+      shift 2;;
+    --restart-cockpit) RESTART=1; shift;;
+    --uninstall) UNINSTALL=1; shift;;
+    -h|--help) usage; exit 0;;
+    *) echo "Unknown option: $1" >&2; exit 2;;
   esac
 done
-
-PLUGIN_VERSION="$(normalize_plugin_version "$PLUGIN_VERSION_INPUT")"
-WORKDIR="$(mktemp -d)"
-
-cleanup() {
-  if [[ "$KEEP_WORKDIR" -eq 0 ]]; then
-    rm -rf "$WORKDIR"
-  else
-    echo "INFO: keeping workdir: $WORKDIR"
+[[ $EUID -eq 0 ]] || { echo 'ERROR: run this installer as root, for example sudo ./install.sh' >&2; exit 1; }
+[[ $DIR = /* && $DIR != / && $DIR != *'/../'* && $DIR != */.. ]] || { echo 'ERROR: invalid install directory' >&2; exit 1; }
+DIR=$(realpath -m -- "$DIR")
+case "$DIR" in /usr/local/share/cockpit/gpus) ;; /usr|/usr/*|/etc|/etc/*|/var|/var/*|/home|/home/*|/root|/root/*|/tmp|/tmp/*|/opt|/opt/*|/boot|/boot/*|/run|/run/*|/dev|/dev/*|/proc|/proc/*|/sys|/sys/*|/) echo 'ERROR: custom directory must not be a system or user directory' >&2; exit 1;; esac
+# Every existing ancestor must be root-controlled and not group/world writable.
+p=$DIR
+while [[ $p != / ]]; do
+  if [[ -e $p || -L $p ]]; then
+    [[ ! -L $p && -d $p && $(stat -c %u "$p") == 0 ]] || { echo "ERROR: unsafe path: $p" >&2; exit 1; }
+    mode=$(stat -c %a "$p")
+    (( (8#$mode & 0022) == 0 )) || { echo "ERROR: writable path: $p" >&2; exit 1; }
   fi
-}
-trap cleanup EXIT
-
-require_cmd() {
-  if ! command -v "$1" >/dev/null 2>&1; then
-    echo "ERROR: required command not found: $1" >&2
-    exit 3
-  fi
-}
-
-is_installable_dist_dir() {
-  local d="$1"
-  [[ -f "$d/manifest.json" ]] || return 1
-  ([[ -f "$d/cockpit-gpu.js" ]] || [[ -f "$d/cockpit-gpu.js.gz" ]]) || return 1
-  ([[ -f "$d/cockpit-gpu.css" ]] || [[ -f "$d/cockpit-gpu.css.gz" ]]) || return 1
-  return 0
-}
-
-ensure_plain_file_from_gz() {
-  local gz_file="$1"
-  local plain_file="$2"
-
-  [[ -f "$plain_file" ]] && return 0
-  [[ -f "$gz_file" ]] || return 1
-  require_cmd gzip
-  gzip -dc "$gz_file" > "$plain_file"
-}
-
-copy_if_missing() {
-  local dst="$1"
-  local src="$2"
-  if [[ ! -f "$dst" && -f "$src" ]]; then
-    cp "$src" "$dst"
-  fi
-}
-
-apply_version_to_index() {
-  local index_file="$1"
-  [[ -f "$index_file" ]] || return 0
-
-  perl -pi -e "s#(href[[:space:]]*=[[:space:]]*['\\\"])([^'\\\"[:space:]>]*cockpit-gpu\\.css)(?:\\?[^'\\\"[:space:]>]*)?(['\\\"])#\\1cockpit-gpu.css?v=${PLUGIN_VERSION}\\3#g" "$index_file"
-  perl -pi -e "s#(src[[:space:]]*=[[:space:]]*['\\\"])([^'\\\"[:space:]>]*cockpit-gpu-boot\\.js)(?:\\?[^'\\\"[:space:]>]*)?(['\\\"])#\\1cockpit-gpu-boot.js?v=${PLUGIN_VERSION}\\3#g" "$index_file"
-}
-
-apply_version_to_js() {
-  local js_file="$1"
-  [[ -f "$js_file" ]] || return 0
-  perl -pi -e "s/(APP_VERSION\\s*=\\s*['\\\"])[0-9]{2}\\.[0-9]{4}\\.[0-9]{4}(['\\\"])/\${1}${PLUGIN_VERSION}\${2}/g" "$js_file"
-  if ! grep -q "${PLUGIN_VERSION}" "$js_file"; then
-    perl -pi -e "s/[0-9]{2}\\.[0-9]{4}\\.[0-9]{4}/${PLUGIN_VERSION}/g" "$js_file"
-  fi
-}
-
-apply_version_to_boot() {
-  local boot_file="$1"
-  [[ -f "$boot_file" ]] || return 0
-  perl -pi -e "s/(const\\s+version\\s*=\\s*['\\\"])[0-9]{2}\\.[0-9]{4}\\.[0-9]{4}(['\\\"])/\${1}${PLUGIN_VERSION}\${2}/g" "$boot_file"
-  if ! grep -q "${PLUGIN_VERSION}" "$boot_file"; then
-    perl -pi -e "s/[0-9]{2}\\.[0-9]{4}\\.[0-9]{4}/${PLUGIN_VERSION}/g" "$boot_file"
-  fi
-}
-
-patch_manifest() {
-  local manifest_file="$1"
-  [[ -f "$manifest_file" ]] || return 0
-  require_cmd python3
-  python3 - "$manifest_file" "$PLUGIN_NAME" "$PLUGIN_VERSION" <<'PY'
-import json
-import sys
-path, plugin_name, plugin_version = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(path, "r", encoding="utf-8") as f:
-    data = json.load(f)
-data["name"] = plugin_name
-data["version"] = plugin_version
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(data, f, ensure_ascii=False, indent=4)
-    f.write("\n")
+  p=${p%/*}; [[ -n $p ]] || p=/
+done
+is_plugin() {
+  python3 - "$1/manifest.json" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as f:
+        assert json.load(f).get('name') == 'gpus'
+except (OSError, ValueError, AssertionError):
+    sys.exit(1)
 PY
 }
-
-generate_gzip_assets() {
-  if ! command -v gzip >/dev/null 2>&1; then
-    echo "WARN: gzip not found, skip generating .gz assets"
-    return 0
-  fi
-
-  local f
-  for f in cockpit-gpu.js cockpit-gpu.css cockpit-gpu-boot.js; do
-    if [[ -f "$STAGE_DIR/$f" ]]; then
-      gzip -c "$STAGE_DIR/$f" > "$STAGE_DIR/$f.gz"
-    fi
-  done
-}
-
-build_dist_from_plugin_source() {
-  local root="$1"
-  local plugin_dir="$root/plugin"
-  local cockpit_root=""
-  local candidate=""
-
-  [[ -d "$plugin_dir" ]] || return 1
-  require_cmd node
-  require_cmd npm
-  require_cmd rsync
-
-  if [[ -x "$root/vendors/cockpit/build.js" ]]; then
-    cockpit_root="$root/vendors/cockpit"
+if [[ -d $DIR ]] && [[ -n $(find "$DIR" -mindepth 1 -maxdepth 1 -print -quit) ]] && ! is_plugin "$DIR"; then
+  echo "ERROR: nonempty directory is not a gpus plugin: $DIR" >&2; exit 1
+fi
+restart_cockpit() {
+  if ((RESTART)); then
+    for unit in cockpit.socket cockpit.service cockpit-ws.socket cockpit-ws.service; do
+      if systemctl list-unit-files "$unit" --no-legend 2>/dev/null | grep -q "^$unit "; then systemctl restart "$unit"; fi
+    done
   else
-    require_cmd curl
-    require_cmd tar
-    local cockpit_work="$WORKDIR/cockpit-builder"
-    local cockpit_archive="$cockpit_work/cockpit.tar.gz"
-    local cockpit_url="https://codeload.github.com/${COCKPIT_REPO}/tar.gz/${COCKPIT_REF}"
-
-    mkdir -p "$cockpit_work"
-    echo "INFO: downloading Cockpit build environment: $cockpit_url" >&2
-    curl -fL "$cockpit_url" -o "$cockpit_archive"
-    tar -xzf "$cockpit_archive" -C "$cockpit_work"
-    cockpit_root="$(find "$cockpit_work" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+    echo 'Refresh Cockpit; use --restart-cockpit to restart its services.'
   fi
-
-  if [[ -z "$cockpit_root" || ! -d "$cockpit_root" || ! -d "$cockpit_root/pkg" ]]; then
-    echo "ERROR: invalid Cockpit build root: $cockpit_root" >&2
-    return 1
-  fi
-
-  mkdir -p "$cockpit_root/pkg/cockpit-gpu"
-  echo "INFO: syncing plugin source into Cockpit build tree" >&2
-  rsync -a --delete "$plugin_dir/" "$cockpit_root/pkg/cockpit-gpu/"
-  patch_cockpit_files_js "$cockpit_root"
-
-  if [[ -x "$cockpit_root/tools/node-modules" && -n "$(command -v podman || true)" ]]; then
-    echo "INFO: installing Cockpit node modules (podman path)" >&2
-    if ! (cd "$cockpit_root" && ./tools/node-modules install) >&2; then
-      echo "WARN: tools/node-modules install failed, fallback to npm install" >&2
-      (cd "$cockpit_root" && npm install) >&2
-    fi
-  else
-    echo "INFO: installing npm dependencies" >&2
-    (cd "$cockpit_root" && npm install) >&2
-  fi
-
-  echo "INFO: building cockpit-gpu dist" >&2
-  if ! (cd "$cockpit_root" && NODE_ENV=production ./build.js cockpit-gpu) >&2; then
-    echo "WARN: build.js returned non-zero, checking dist artifacts anyway" >&2
-  fi
-
-  candidate="$cockpit_root/dist/cockpit-gpu"
-  if is_installable_dist_dir "$candidate"; then
-    BUILT_DIST_DIR="$candidate"
-    return 0
-  fi
-
-  echo "ERROR: build finished but dist output not found at $candidate" >&2
-  return 1
 }
-
-patch_cockpit_files_js() {
-  local cockpit_root="$1"
-  local files_js="$cockpit_root/files.js"
-  [[ -f "$files_js" ]] || return 0
-
-  require_cmd python3
-  python3 - "$files_js" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-p = Path(sys.argv[1])
-text = p.read_text(encoding="utf-8")
-original = text
-
-def add_to_array(src: str, key: str, value: str) -> str:
-    pattern = rf"({key}\s*:\s*\[)([\s\S]*?)(\n\s*\],)"
-    m = re.search(pattern, src)
-    if not m:
-        return src
-    head, body, tail = m.group(1), m.group(2), m.group(3)
-    if value in body:
-        return src
-    body = body.rstrip() + f"\n        {value},"
-    return src[:m.start()] + head + body + tail + src[m.end():]
-
-text = add_to_array(text, "entries", '"cockpit-gpu/cockpit-gpu.jsx"')
-text = add_to_array(text, "files", '"cockpit-gpu/index.html"')
-
-if text != original:
-    p.write_text(text, encoding="utf-8")
-PY
-}
-
-find_source_dir() {
-  local root="$1"
-  local candidate
-
-  for candidate in \
-    "$root/dist_manual/cockpit-gpu" \
-    "$root/dist/cockpit-gpu" \
-    "$root/plugin-dist/cockpit-gpu" \
-    "$root/vendors/cockpit/dist_manual/cockpit-gpu" \
-    "$root/vendors/cockpit/dist/cockpit-gpu"; do
-    if is_installable_dist_dir "$candidate"; then
-      echo "$candidate"
-      return 0
-    fi
-  done
-
-  BUILT_DIST_DIR=""
-  if build_dist_from_plugin_source "$root" && [[ -n "$BUILT_DIST_DIR" ]] && [[ -f "$BUILT_DIST_DIR/manifest.json" ]]; then
-    echo "$BUILT_DIST_DIR"
-    return 0
-  fi
-
-  return 1
-}
-
-if [[ -n "$FROM_LOCAL" ]]; then
-  REPO_DIR="$(cd "$FROM_LOCAL" && pwd)"
+if ((UNINSTALL)); then
+  systemctl disable --now cockpit-gpu-usage-collector.service 2>/dev/null || true
+  rm -f -- "$UNIT" "$LIBEXEC/cockpit-gpu-usage-collector.py"
+  rmdir -- "$LIBEXEC" 2>/dev/null || true
+  if [[ -d $DIR ]] && is_plugin "$DIR"; then rm -rf -- "$DIR"; fi
+  rm -rf -- "$STATE"
+  if id cockpit-gpu >/dev/null 2>&1; then userdel cockpit-gpu; fi
+  systemctl daemon-reload 2>/dev/null || true
+  restart_cockpit
+  exit 0
+fi
+[[ -n $BUILD_USER ]] && id "$BUILD_USER" >/dev/null 2>&1 && [[ $(id -u "$BUILD_USER") -ne 0 ]] || { echo 'ERROR: specify an existing non-root --build-user (or invoke via sudo)' >&2; exit 1; }
+[[ $REF =~ ^[0-9a-f]{40}$ ]] || { echo 'ERROR: --ref must be a full commit SHA' >&2; exit 1; }
+[[ $REPO =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]] || { echo 'ERROR: invalid repository' >&2; exit 1; }
+WORK=$(mktemp -d /tmp/cockpit-gpu-build.XXXXXXXX)
+trap 'rm -rf -- "$WORK"' EXIT
+chown "$BUILD_USER" "$WORK"
+# Build and all dependency scripts are run without root privileges.
+runuser -u "$BUILD_USER" -- bash -s -- "$WORK" "$LOCAL" "$REPO" "$REF" "$COCKPIT_TAG" "$COCKPIT_SHA256" <<'BUILD'
+set -euo pipefail
+work=$1 local_source=$2 repo=$3 ref=$4 tag=$5 hash=$6
+if [[ -n $local_source ]]; then
+  cp -rL -- "$local_source/plugin" "$work/plugin"
 else
-  require_cmd curl
-  require_cmd tar
-  ARCHIVE_URL="https://codeload.github.com/${REPO_SLUG}/tar.gz/${REF}"
-  ARCHIVE_FILE="$WORKDIR/repo.tar.gz"
-  echo "INFO: downloading $ARCHIVE_URL"
-  curl -fL "$ARCHIVE_URL" -o "$ARCHIVE_FILE"
-  tar -xzf "$ARCHIVE_FILE" -C "$WORKDIR"
-  REPO_DIR="$(find "$WORKDIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+  curl -fsSL "https://codeload.github.com/$repo/tar.gz/$ref" -o "$work/plugin.tar.gz"
+  mkdir "$work/source"
+  tar -xzf "$work/plugin.tar.gz" -C "$work/source" --strip-components=1
+  cp -rL "$work/source/plugin" "$work/plugin"
 fi
-
-if [[ -z "${REPO_DIR:-}" || ! -d "$REPO_DIR" ]]; then
-  echo "ERROR: failed to locate repository content" >&2
-  exit 4
-fi
-
-SOURCE_DIR="$(find_source_dir "$REPO_DIR" || true)"
-if [[ -z "$SOURCE_DIR" ]]; then
-  echo "ERROR: no installable cockpit-gpu dist found under repository" >&2
-  exit 5
-fi
-
-STAGE_DIR="$WORKDIR/stage"
-mkdir -p "$STAGE_DIR"
-cp -a "$SOURCE_DIR/." "$STAGE_DIR/"
-copy_if_missing "$STAGE_DIR/index.html" "$REPO_DIR/plugin/index.html"
-copy_if_missing "$STAGE_DIR/cockpit-gpu-boot.js" "$REPO_DIR/plugin/cockpit-gpu-boot.js"
-copy_if_missing "$STAGE_DIR/po.js" "$REPO_DIR/plugin/po.js"
-if [[ -f "$REPO_DIR/plugin/cockpit-gpu-usage-collector.py" ]]; then
-    cp "$REPO_DIR/plugin/cockpit-gpu-usage-collector.py" "$STAGE_DIR/"
-fi
-if [[ -f "$REPO_DIR/plugin/cockpit-gpu-usage-collector.service" ]]; then
-    cp "$REPO_DIR/plugin/cockpit-gpu-usage-collector.service" "$STAGE_DIR/"
-fi
-ensure_plain_file_from_gz "$STAGE_DIR/cockpit-gpu.js.gz" "$STAGE_DIR/cockpit-gpu.js" || true
-ensure_plain_file_from_gz "$STAGE_DIR/cockpit-gpu.css.gz" "$STAGE_DIR/cockpit-gpu.css" || true
-ensure_plain_file_from_gz "$STAGE_DIR/cockpit-gpu-boot.js.gz" "$STAGE_DIR/cockpit-gpu-boot.js" || true
-if [[ -f "$STAGE_DIR/cockpit-gpu-usage-collector.py" ]]; then
-    chmod +x "$STAGE_DIR/cockpit-gpu-usage-collector.py"
-fi
-
-for required in manifest.json index.html cockpit-gpu.js cockpit-gpu.css cockpit-gpu-boot.js; do
-  if [[ ! -f "$STAGE_DIR/$required" ]]; then
-    echo "ERROR: missing required staged file: $required" >&2
-    exit 6
+curl -fsSL "https://codeload.github.com/cockpit-project/cockpit/tar.gz/refs/tags/$tag" -o "$work/cockpit.tar.gz"
+echo "$hash  $work/cockpit.tar.gz" | sha256sum -c -
+mkdir "$work/cockpit"
+tar -xzf "$work/cockpit.tar.gz" -C "$work/cockpit" --strip-components=1
+cp -r "$work/plugin" "$work/cockpit/pkg/cockpit-gpu"
+python3 - "$work/cockpit/files.js" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+for key, value in [('entries', '"cockpit-gpu/cockpit-gpu.jsx"'), ('files', '"cockpit-gpu/index.html"')]:
+    s, n = re.subn(r'(' + key + r'\s*:\s*\[)', r'\1\n        ' + value + ',', s, count=1)
+    if n != 1: raise SystemExit('Cannot patch Cockpit files.js: ' + key)
+open(p, 'w', encoding='utf-8').write(s)
+PY
+cd "$work/cockpit"
+npm install --ignore-scripts
+NODE_ENV=production ./build.js cockpit-gpu
+BUILD
+DIST=$WORK/cockpit/dist/cockpit-gpu
+for f in cockpit-gpu.js cockpit-gpu.css; do
+  if [[ ! -f $DIST/$f && -f $DIST/$f.gz ]]; then
+    runuser -u "$BUILD_USER" -- gzip -dk "$DIST/$f.gz"
   fi
 done
-
-patch_manifest "$STAGE_DIR/manifest.json"
-apply_version_to_index "$STAGE_DIR/index.html"
-apply_version_to_js "$STAGE_DIR/cockpit-gpu.js"
-apply_version_to_boot "$STAGE_DIR/cockpit-gpu-boot.js"
-generate_gzip_assets
-
-mkdir -p "$INSTALL_DIR"
-if command -v rsync >/dev/null 2>&1; then
-  rsync -av --delete "$STAGE_DIR/" "$INSTALL_DIR/"
-else
-  rm -rf "$INSTALL_DIR"
-  mkdir -p "$INSTALL_DIR"
-  cp -a "$STAGE_DIR/." "$INSTALL_DIR/"
-fi
-
-if [[ "$INSTALL_DIR" == *"/.local/share/cockpit/"* ]]; then
-  rm -rf "$HOME/.local/share/cockpit/gpu-monitor" \
-         "$HOME/.local/share/cockpit/cockpit-gpu" \
-         "$HOME/.local/share/cockpit/cockpit-monitor" 2>/dev/null || true
-fi
-
-restart_existing_units() {
-  local prefix="$1"
-  shift
-  local unit
-  local list_cmd=(systemctl list-unit-files --no-legend --plain)
-
-  if [[ "$prefix" == "sudo" ]]; then
-    list_cmd=(sudo "${list_cmd[@]}")
-  elif [[ "$prefix" == "user" ]]; then
-    list_cmd=(systemctl --user list-unit-files --no-legend --plain)
-  fi
-
-  for unit in "$@"; do
-    if "${list_cmd[@]}" "$unit" 2>/dev/null | awk 'NF>0 {found=1} END{exit !found}'; then
-      if [[ "$prefix" == "sudo" ]]; then
-        sudo systemctl restart "$unit" >/dev/null 2>&1 || true
-      elif [[ "$prefix" == "user" ]]; then
-        systemctl --user restart "$unit" >/dev/null 2>&1 || true
-      else
-        systemctl restart "$unit" >/dev/null 2>&1 || true
-      fi
-    fi
-  done
-
-  return 0
-}
-
-install_usage_collector_service() {
-  local template="$STAGE_DIR/cockpit-gpu-usage-collector.service"
-  [[ -f "$template" ]] || return 0
-  [[ -x "$INSTALL_DIR/cockpit-gpu-usage-collector.py" ]] || return 0
-
-  if ! command -v systemctl >/dev/null 2>&1; then
-    return 0
-  fi
-
-  local rendered="$WORKDIR/cockpit-gpu-usage-collector.service"
-  sed "s|{{INSTALL_DIR}}|${INSTALL_DIR}|g" "$template" > "$rendered"
-
-  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    local system_unit="/etc/systemd/system/cockpit-gpu-usage-collector.service"
-    sudo install -m 0644 "$rendered" "$system_unit"
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now cockpit-gpu-usage-collector.service || true
-    return 0
-  fi
-
-  echo "WARN: skip persistent collector service install; system-level installation requires root privileges (sudo) or running installer as root."
-  return 0
-
-}
-
-if command -v systemctl >/dev/null 2>&1; then
-  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    restart_existing_units sudo cockpit.socket cockpit.service cockpit-ws.socket cockpit-ws.service || true
-  else
-    restart_existing_units user cockpit.socket cockpit.service cockpit-ws.socket cockpit-ws.service || true
-  fi
-fi
-install_usage_collector_service || true
-
-echo
-echo "Installed cockpit GPU plugin:"
-echo "  repo:      ${REPO_SLUG}"
-echo "  ref:       ${REF}"
-echo "  version:   ${PLUGIN_VERSION}"
-echo "  target:    ${INSTALL_DIR}"
-echo
-echo "Open Cockpit page:"
-echo "  /cockpit/@localhost/${PLUGIN_NAME}/"
+for f in manifest.json cockpit-gpu.js cockpit-gpu.css; do [[ -f $DIST/$f && ! -L $DIST/$f ]] || { echo "ERROR: missing build output $f" >&2; exit 1; }; done
+# Only install regular files, never build-user-owned symlinks or executable bits.
+[[ -z $(find "$DIST" -type l -print -quit) ]] || { echo 'ERROR: symlink in build output' >&2; exit 1; }
+install -d -o root -g root -m 0755 "$DIR" "$LIBEXEC"
+rsync -r --delete --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r --chown=root:root "$DIST/" "$DIR/"
+for f in index.html cockpit-gpu-boot.js po.js; do install -o root -g root -m 0644 "$WORK/plugin/$f" "$DIR/$f"; done
+install -o root -g root -m 0755 "$WORK/plugin/cockpit-gpu-usage-collector.py" "$LIBEXEC/cockpit-gpu-usage-collector.py"
+cat > "$UNIT" <<'UNITFILE'
+[Unit]
+Description=Cockpit GPU usage collector
+After=network.target
+[Service]
+Type=simple
+User=cockpit-gpu
+ExecStart=/usr/local/libexec/cockpit-gpu/cockpit-gpu-usage-collector.py
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/cockpit/gpus
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+[Install]
+WantedBy=multi-user.target
+UNITFILE
+chmod 0644 "$UNIT"
+if ! id cockpit-gpu >/dev/null 2>&1; then useradd --system --no-create-home --shell /usr/sbin/nologin cockpit-gpu; fi
+install -d -o cockpit-gpu -g cockpit-gpu -m 0755 "$STATE"
+if [[ -f $STATE/usage-summary.json && ! -L $STATE/usage-summary.json ]]; then chown cockpit-gpu:cockpit-gpu "$STATE/usage-summary.json"; fi
+systemctl daemon-reload
+systemctl enable --now cockpit-gpu-usage-collector.service
+restart_cockpit
+echo "Installed in $DIR"

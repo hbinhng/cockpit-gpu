@@ -4,10 +4,21 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart={{INSTALL_DIR}}/cockpit-gpu-usage-collector.py
+User=cockpit-gpu
+ExecStart=/usr/local/libexec/cockpit-gpu/cockpit-gpu-usage-collector.py
 Environment=PYTHONUNBUFFERED=1
 Restart=always
 RestartSec=5s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/cockpit/gpus
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
 
 [Install]
 WantedBy=multi-user.target
