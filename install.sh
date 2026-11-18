@@ -128,38 +128,22 @@ for f in cockpit-gpu.js cockpit-gpu.css; do
     runuser -u "$BUILD_USER" -- gzip -dk "$DIST/$f.gz"
   fi
 done
-for f in manifest.json cockpit-gpu.js cockpit-gpu.css; do [[ -f $DIST/$f && ! -L $DIST/$f ]] || { echo "ERROR: missing build output $f" >&2; exit 1; }; done
-# Only install regular files, never build-user-owned symlinks or executable bits.
-[[ -z $(find "$DIST" -type l -print -quit) ]] || { echo 'ERROR: symlink in build output' >&2; exit 1; }
+# Root never reads the build-user-writable tree directly: the build user streams it out with its own
+# privileges (tar -h dereferences symlinks as that user), root unpacks into a root-only staging dir.
+STAGE=$(mktemp -d /tmp/cockpit-gpu-stage.XXXXXXXX)
+trap 'rm -rf -- "$WORK" "$STAGE"' EXIT
+chmod 0700 "$STAGE"
+mkdir "$STAGE/dist" "$STAGE/plugin"
+runuser -u "$BUILD_USER" -- tar -chf - -C "$DIST" . | tar -xf - -C "$STAGE/dist" --no-same-owner --no-same-permissions
+runuser -u "$BUILD_USER" -- tar -chf - -C "$WORK/plugin" index.html cockpit-gpu-boot.js po.js cockpit-gpu-usage-collector.py cockpit-gpu-usage-collector.service \
+  | tar -xf - -C "$STAGE/plugin" --no-same-owner --no-same-permissions
+[[ -z $(find "$STAGE" -mindepth 1 ! -type f ! -type d -print -quit) ]] || { echo 'ERROR: non-regular file in build output' >&2; exit 1; }
+for f in manifest.json cockpit-gpu.js cockpit-gpu.css; do [[ -f $STAGE/dist/$f ]] || { echo "ERROR: missing build output $f" >&2; exit 1; }; done
 install -d -o root -g root -m 0755 "$DIR" "$LIBEXEC"
-rsync -r --delete --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r --chown=root:root "$DIST/" "$DIR/"
-for f in index.html cockpit-gpu-boot.js po.js; do install -o root -g root -m 0644 "$WORK/plugin/$f" "$DIR/$f"; done
-install -o root -g root -m 0755 "$WORK/plugin/cockpit-gpu-usage-collector.py" "$LIBEXEC/cockpit-gpu-usage-collector.py"
-cat > "$UNIT" <<'UNITFILE'
-[Unit]
-Description=Cockpit GPU usage collector
-After=network.target
-[Service]
-Type=simple
-User=cockpit-gpu
-ExecStart=/usr/local/libexec/cockpit-gpu/cockpit-gpu-usage-collector.py
-Environment=PYTHONUNBUFFERED=1
-Restart=always
-RestartSec=5s
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-ReadWritePaths=/var/lib/cockpit/gpus
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-[Install]
-WantedBy=multi-user.target
-UNITFILE
-chmod 0644 "$UNIT"
+rsync -r --delete --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r --chown=root:root "$STAGE/dist/" "$DIR/"
+for f in index.html cockpit-gpu-boot.js po.js; do install -o root -g root -m 0644 "$STAGE/plugin/$f" "$DIR/$f"; done
+install -o root -g root -m 0755 "$STAGE/plugin/cockpit-gpu-usage-collector.py" "$LIBEXEC/cockpit-gpu-usage-collector.py"
+install -o root -g root -m 0644 "$STAGE/plugin/cockpit-gpu-usage-collector.service" "$UNIT"
 if ! id cockpit-gpu >/dev/null 2>&1; then useradd --system --no-create-home --shell /usr/sbin/nologin cockpit-gpu; fi
 install -d -o cockpit-gpu -g cockpit-gpu -m 0755 "$STATE"
 if [[ -f $STATE/usage-summary.json && ! -L $STATE/usage-summary.json ]]; then chown cockpit-gpu:cockpit-gpu "$STATE/usage-summary.json"; fi
