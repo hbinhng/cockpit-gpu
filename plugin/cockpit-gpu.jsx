@@ -107,6 +107,7 @@ const GPU_QUERY_FIELDS_EXT_TEMP_AMBIENT = [
 const CHART_PURPLE_100 = 'var(--nvidia-gpu-chart-purple-100)';
 const CHART_PURPLE_200 = 'var(--nvidia-gpu-chart-purple-200)';
 const CHART_PURPLE_300 = 'var(--nvidia-gpu-chart-purple-300)';
+const CHART_POWER = 'var(--pf-t--global--color--status--success--default)';
 
 const GPU_QUERY_FIELDS_ESSENTIAL = [
     { field: 'index', key: 'index' },
@@ -2289,7 +2290,7 @@ function makeSafeChartId(value) {
         .replace(/^-+|-+$/g, '');
 }
 
-function HistoryChart({ title, unit, color, data, max, min = 0, chartId = '', className = '', currentValue = null, rightText = null, secondData = null, secondColor = null }) {
+function HistoryChart({ title, unit, color, data, max, min = 0, chartId = '', className = '', currentValue = null, rightText = null, secondData = null, secondColor = null, titleSuffix = null }) {
     const points = data.filter(p => Number.isFinite(p.value));
     const effectivePoints = points.length
         ? points
@@ -2341,7 +2342,7 @@ function HistoryChart({ title, unit, color, data, max, min = 0, chartId = '', cl
             className={`nvidia-gpu-chart${className ? ` ${className}` : ''}`}
             style={{ color }}
         >
-            <div className="nvidia-gpu-chart__title">{title}</div>
+            <div className="nvidia-gpu-chart__title">{title}{titleSuffix && <> + <span style={{ color: secondColor }}>{titleSuffix}</span></>}</div>
             <div className="nvidia-gpu-chart__values"><div className="nvidia-gpu-chart__value">{latestText}</div>{rightText && <div className="nvidia-gpu-chart__value nvidia-gpu-chart__value--right" style={{ color: secondColor || undefined }}>{rightText}</div>}</div>
             <div className="nvidia-gpu-chart__svg-wrap" role="img" aria-label={`${title} ${latestText}`}>
                 {noData
@@ -2624,14 +2625,15 @@ function GpuCard({ gpu, history }) {
                     </div>
                     <div className="nvidia-gpu-card__chart-cell nvidia-gpu-card__chart-cell--spark nvidia-gpu-card__chart-cell--sparkline">
                         <HistoryChart
-                            title={_('Temp + Power')}
+                            title={_('Temp')}
+                            titleSuffix={_('Power')}
                             unit="°C"
                             color={CHART_PURPLE_100}
                             className="nvidia-gpu-chart--mini"
                             currentValue={gpu.temperature}
                             rightText={powerText}
                             secondData={powerHistory}
-                            secondColor={CHART_PURPLE_300}
+                            secondColor={CHART_POWER}
                             max={100}
                             chartId={`${chartSeed}-temp`}
                             data={tempHistory}
