@@ -19,7 +19,6 @@ import { DescriptionList, DescriptionListDescription, DescriptionListGroup, Desc
 import { Flex, FlexItem } from '@patternfly/react-core/dist/esm/layouts/Flex/index.js';
 import { Grid, GridItem } from '@patternfly/react-core/dist/esm/layouts/Grid/index.js';
 import { Badge } from '@patternfly/react-core/dist/esm/components/Badge/index.js';
-import { Progress } from '@patternfly/react-core/dist/esm/components/Progress/index.js';
 import { Spinner } from '@patternfly/react-core/dist/esm/components/Spinner/index.js';
 import { Tabs, Tab, TabTitleText } from '@patternfly/react-core/dist/esm/components/Tabs/index.js';
 import { EmptyStatePanel } from 'cockpit-components-empty-state.jsx';
@@ -2659,20 +2658,6 @@ function formatPercent(value) {
     return `${safeFormatNumber(value)}%`;
 }
 
-function formatUsageHours(value) {
-    if (!Number.isFinite(value))
-        return _('N/A');
-
-    const hours = value / (60 * 60 * 1000);
-    const roundedHours = Math.round(hours * 10) / 10;
-
-    if (!Number.isFinite(roundedHours) || roundedHours < 0)
-        return _('N/A');
-
-    const precision = roundedHours < 1 ? 1 : (Number.isInteger(roundedHours) ? 0 : 1);
-    return `${safeFormatNumber(roundedHours, precision)}h`;
-}
-
 function formatWatt(value) {
     return `${safeFormatNumber(value)} W`;
 }
@@ -2720,13 +2705,6 @@ function createHistoryEntry(gpu, time) {
         pcieTxThroughput: gpu.pcieTxThroughput,
         pcieRxThroughput: gpu.pcieRxThroughput,
     };
-}
-
-function clamp01(v, fallback = 0) {
-    if (!Number.isFinite(v))
-        return fallback;
-
-    return Math.min(100, Math.max(fallback, v));
 }
 
 function MetricSection({ title, children, className }) {
@@ -2780,7 +2758,7 @@ function makeSafeChartId(value) {
         .replace(/^-+|-+$/g, '');
 }
 
-function HistoryChart({ title, unit, color, data, max, min = 0, chartId = '', className = '', currentValue = null }) {
+function HistoryChart({ title, unit, color, data, max, min = 0, chartId = '', className = '', currentValue = null, rightText = null, secondData = null, secondColor = null }) {
     const points = data.filter(p => Number.isFinite(p.value));
     const effectivePoints = points.length
         ? points
@@ -2824,9 +2802,7 @@ function HistoryChart({ title, unit, color, data, max, min = 0, chartId = '', cl
         lineFill.push(`${path} L${lastX} 100 L${firstX} 100 Z`);
     }
 
-    const latest = points.length
-        ? points[points.length - 1]?.value
-        : (Number.isFinite(currentValue) ? currentValue : null);
+    const latest = Number.isFinite(currentValue) ? currentValue : (rightText == null && points.length ? points[points.length - 1].value : null);
     const latestText = latest == null ? _('N/A') : `${safeFormatNumber(latest, 1)} ${unit}`;
 
     return (
@@ -2835,7 +2811,7 @@ function HistoryChart({ title, unit, color, data, max, min = 0, chartId = '', cl
             style={{ color }}
         >
             <div className="nvidia-gpu-chart__title">{title}</div>
-            <div className="nvidia-gpu-chart__value">{latestText}</div>
+            <div className="nvidia-gpu-chart__values"><div className="nvidia-gpu-chart__value">{latestText}</div>{rightText && <div className="nvidia-gpu-chart__value nvidia-gpu-chart__value--right" style={{ color: secondColor || undefined }}>{rightText}</div>}</div>
             <div className="nvidia-gpu-chart__svg-wrap" role="img" aria-label={`${title} ${latestText}`}>
                 {noData
                     ? <div className="nvidia-gpu-chart__empty">{_('waiting for data…')}</div>
@@ -2854,6 +2830,15 @@ function HistoryChart({ title, unit, color, data, max, min = 0, chartId = '', cl
                             d={lineFill.join(' ')}
                             fill={`url(#nvidia-gpu-gradient-${chartIdText})`}
                         />
+                        {secondData && (() => {
+                            const valid = secondData.filter(p => Number.isFinite(p.value));
+                            const entries = valid.length === 1 ? [valid[0], valid[0]] : valid;
+                            const coords = entries.map((entry, index) => ({
+                                x: index / (entries.length - 1 || 1) * 100,
+                                y: 100 - Math.max(0, Math.min(100, entry.value)),
+                            }));
+                            return coords.length ? <path className="nvidia-gpu-chart__line" d={buildSmoothPath(coords)} fill="none" stroke={secondColor} strokeWidth="1.8" /> : null;
+                        })()}
                         <path
                             className="nvidia-gpu-chart__line"
                             d={sparkline.join(' ')}
@@ -3000,13 +2985,12 @@ function GpuHistoryCharts({ history }) {
     );
 }
 
-function GpuCard({ gpu, history, usageSummary = {} }) {
+function GpuCard({ gpu, history }) {
     const historyPoints = history || [];
     const memUsed = gpu.memoryUsed;
     const memTotal = gpu.memoryTotal;
     const memPct = memUsed != null && memTotal ? (memUsed / memTotal) * 100 : null;
-    const powerCap = gpu.powerDefaultLimit != null ? gpu.powerDefaultLimit : gpu.powerLimit;
-    const powerPercent = gpu.powerDraw != null && powerCap ? (gpu.powerDraw / powerCap) * 100 : null;
+    const powerCap = gpu.powerLimit;
     const tempStats = calcSeriesStats(historyPoints.map(p => p.temperature).filter(v => v != null).concat([gpu.temperature]).filter(v => Number.isFinite(v)));
     const memTempStats = calcSeriesStats(historyPoints.map(p => p.memoryTemperature).filter(v => v != null).concat([gpu.memoryTemperature]).filter(v => Number.isFinite(v)));
     const ambientTempStats = calcSeriesStats(historyPoints.map(p => p.temperatureAmbient).filter(v => v != null).concat([gpu.temperatureAmbient]).filter(v => Number.isFinite(v)));
@@ -3028,12 +3012,10 @@ function GpuCard({ gpu, history, usageSummary = {} }) {
     }));
     const tempHistory = historyPoints.map(item => ({
         t: item.t,
-        value: Number.isFinite(item.temperature) ? item.temperature : null,
+        value: Number.isFinite(item.temperature) ? Math.max(0, Math.min(100, item.temperature)) : null,
     }));
 
-    const powerText = powerCap != null
-        ? `${formatWatt(gpu.powerDraw)} / ${formatWatt(powerCap)} (${formatPercent(powerPercent)})`
-        : `${formatWatt(gpu.powerDraw)} ${_('/')} ${_('N/A')}`;
+    const powerText = `${formatWatt(gpu.powerDraw)} / ${formatWatt(powerCap)}`;
     const clockText = `${gpu.clockSm != null ? `${gpu.clockSm} MHz` : _('N/A')}${gpu.clockMaxSm != null ? ` / ${gpu.clockMaxSm} MHz` : ''}`;
     const pcieCurrentGen = toNumber(gpu.pcieGenCurrent != null ? gpu.pcieGenCurrent : gpu.pcieGen);
     const pcieCurrentWidth = toNumber(gpu.pcieWidthCurrent != null ? gpu.pcieWidthCurrent : gpu.pcieWidth);
@@ -3082,66 +3064,6 @@ function GpuCard({ gpu, history, usageSummary = {} }) {
                 </CardTitle>
             </CardHeader>
             <CardBody className="nvidia-gpu-card__body">
-                <div className="nvidia-gpu-card__section-title" aria-hidden="true">
-                    {_('GPU utilization by period')}
-                </div>
-                <div className="nvidia-gpu-card__period-summary" aria-label={_('GPU utilization by period')}>
-                    <div className="nvidia-gpu-card__period-item">
-                        <div>{_('Last 24 hours')} {_('used')}</div>
-                        <strong className="nvidia-gpu-card__period-meta nvidia-gpu-card__period-meta--value nvidia-gpu-card__period-highlight">
-                            {formatUsageHours(usageSummary.dayInUseMs)}
-                        </strong>
-                        <div className="nvidia-gpu-card__period-meta">
-                            {_('Avg while in use')}
-                        </div>
-                        <strong className="nvidia-gpu-card__period-highlight">
-                            {formatUsagePercent(usageSummary.dayInUsePercent ?? usageSummary.day)}
-                        </strong>
-                    </div>
-                    <div className="nvidia-gpu-card__period-item">
-                        <div>{_('Last 7 days')} {_('used')}</div>
-                        <strong className="nvidia-gpu-card__period-meta nvidia-gpu-card__period-meta--value nvidia-gpu-card__period-highlight">
-                            {formatUsageHours(usageSummary.weekInUseMs)}
-                        </strong>
-                        <div className="nvidia-gpu-card__period-meta">
-                            {_('Avg while in use')}
-                        </div>
-                        <strong className="nvidia-gpu-card__period-highlight">
-                            {formatUsagePercent(usageSummary.weekInUsePercent ?? usageSummary.week)}
-                        </strong>
-                    </div>
-                    <div className="nvidia-gpu-card__period-item">
-                        <div>{_('Last 30 days')} {_('used')}</div>
-                        <strong className="nvidia-gpu-card__period-meta nvidia-gpu-card__period-meta--value nvidia-gpu-card__period-highlight">
-                            {formatUsageHours(usageSummary.monthInUseMs)}
-                        </strong>
-                        <div className="nvidia-gpu-card__period-meta">
-                            {_('Avg while in use')}
-                        </div>
-                        <strong className="nvidia-gpu-card__period-highlight">
-                            {formatUsagePercent(usageSummary.monthInUsePercent ?? usageSummary.month)}
-                        </strong>
-                    </div>
-                </div>
-                <div className="nvidia-gpu-card__quick-grid">
-                    <div className="nvidia-gpu-card__stat-block">
-                        <div className="nvidia-gpu-card__stat-label">{_('GPU Utilization')}</div>
-                        <div className="nvidia-gpu-card__stat-value">{formatPercent(gpu.utilizationGpu)}</div>
-                        <Progress value={clamp01(gpu.utilizationGpu, 0)} min={0} max={100} aria-label={_('GPU util')} />
-                    </div>
-                    <div className="nvidia-gpu-card__stat-block">
-                        <div className="nvidia-gpu-card__stat-label">{_('Memory')}</div>
-                        <div className="nvidia-gpu-card__stat-value">
-                            {formatBytes(memUsed)} / {formatBytes(memTotal)}
-                        </div>
-                        <Progress value={clamp01(memPct || 0, 0)} min={0} max={100} aria-label={_('Memory util')} />
-                    </div>
-                    <div className="nvidia-gpu-card__stat-block">
-                        <div className="nvidia-gpu-card__stat-label">{_('Power')}</div>
-                        <div className="nvidia-gpu-card__stat-value">{powerText}</div>
-                        <Progress value={clamp01(powerPercent || 0, 0)} min={0} max={100} aria-label={_('Power util')} />
-                    </div>
-                </div>
                 <div className="nvidia-gpu-card__charts">
                     <div className="nvidia-gpu-card__chart-cell nvidia-gpu-card__chart-cell--spark nvidia-gpu-card__chart-cell--sparkline">
                         <HistoryChart
@@ -3150,6 +3072,7 @@ function GpuCard({ gpu, history, usageSummary = {} }) {
                             color={CHART_PURPLE_300}
                             className="nvidia-gpu-chart--mini"
                             currentValue={gpu.utilizationGpu}
+                            rightText={clockText}
                             max={100}
                             chartId={`${chartSeed}-gpu-util`}
                             data={utilHistory}
@@ -3162,6 +3085,7 @@ function GpuCard({ gpu, history, usageSummary = {} }) {
                             color={CHART_PURPLE_200}
                             className="nvidia-gpu-chart--mini"
                             currentValue={memPct}
+                            rightText={`${formatBytes(memUsed)} / ${formatBytes(memTotal)}`}
                             max={100}
                             chartId={`${chartSeed}-memory-util`}
                             data={memUsedHistory}
@@ -3169,12 +3093,15 @@ function GpuCard({ gpu, history, usageSummary = {} }) {
                     </div>
                     <div className="nvidia-gpu-card__chart-cell nvidia-gpu-card__chart-cell--spark nvidia-gpu-card__chart-cell--sparkline">
                         <HistoryChart
-                            title={_('Temp')}
+                            title={_('Temp + Power')}
                             unit="°C"
                             color={CHART_PURPLE_100}
                             className="nvidia-gpu-chart--mini"
                             currentValue={gpu.temperature}
-                            max={110}
+                            rightText={powerText}
+                            secondData={powerHistory}
+                            secondColor={CHART_PURPLE_300}
+                            max={100}
                             chartId={`${chartSeed}-temp`}
                             data={tempHistory}
                         />
@@ -3502,20 +3429,12 @@ function App() {
         };
     }, []);
 
-    const usageSummaryByGpu = useMemo(() => {
-        const map = new Map();
-        for (const row of usageSummary.gpuRows || [])
-            map.set(row.id, row);
-        return map;
-    }, [usageSummary.gpuRows]);
-
     const gpuCards = sortedGpus.map(gpu => {
         const historyEntry = histories[gpu.id] || { points: [] };
-        const summary = usageSummaryByGpu.get(gpu.id) || {};
 
         return (
             <div key={gpu.id} className="nvidia-gpu-card-stack-item">
-                <GpuCard gpu={gpu} history={historyEntry.points} usageSummary={summary} />
+                <GpuCard gpu={gpu} history={historyEntry.points} />
             </div>
         );
     });
