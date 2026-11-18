@@ -22,7 +22,6 @@ import { Badge } from '@patternfly/react-core/dist/esm/components/Badge/index.js
 import { Spinner } from '@patternfly/react-core/dist/esm/components/Spinner/index.js';
 import { Tabs, Tab, TabTitleText } from '@patternfly/react-core/dist/esm/components/Tabs/index.js';
 import { EmptyStatePanel } from 'cockpit-components-empty-state.jsx';
-import { Table, Thead, Tbody, Td, Th, Tr, TableVariant } from '@patternfly/react-table';
 
 import './cockpit-gpu.scss';
 
@@ -31,15 +30,6 @@ const _ = cockpit.gettext;
 const POLL_INTERVAL_MS = 2000;
 const HISTORY_WINDOW_MS = 10 * 60 * 1000;
 const MAX_HISTORY_POINTS = 300;
-const DAY_MS = 24 * 60 * 60 * 1000;
-const USAGE_MAX_DAYS = 30;
-const USAGE_BUCKET_MS = 60 * 60 * 1000;
-const USAGE_SUMMARY_VERSION = 3;
-const USAGE_STORAGE_DIR = '/var/lib/cockpit/gpus';
-const USAGE_STORAGE_PATH = `${USAGE_STORAGE_DIR}/usage-summary.json`;
-const USAGE_WINDOW_DAY = DAY_MS;
-const USAGE_WINDOW_WEEK = 7 * DAY_MS;
-const USAGE_WINDOW_MONTH = 30 * DAY_MS;
 const APP_VERSION = (() => {
     const manifestVersion = cockpit?.manifests?.gpus?.version;
     if (typeof manifestVersion === 'string' && manifestVersion.trim().length > 0)
@@ -805,24 +795,6 @@ function deriveGpuId(index, uuid) {
     return safeUuid || safeIndex;
 }
 
-function dayKey(timeMs) {
-    const current = new Date(timeMs);
-    current.setHours(0, 0, 0, 0);
-    return current.getTime();
-}
-
-function usageBucketKey(timeMs) {
-    const now = Number(timeMs);
-    if (!Number.isFinite(now))
-        return null;
-    return Math.floor(now / USAGE_BUCKET_MS) * USAGE_BUCKET_MS;
-}
-
-function formatDayLabel(timeMs) {
-    const current = new Date(timeMs);
-    return current.toLocaleDateString([], { month: 'short', day: 'numeric' });
-}
-
 function calcSeriesStats(values) {
     const finite = values.filter(v => Number.isFinite(v));
     if (finite.length === 0)
@@ -847,10 +819,6 @@ function calcSeriesStats(values) {
     };
 }
 
-function formatUsagePercent(value) {
-    return value == null ? _('N/A') : formatPercent(value);
-}
-
 function calculatePcieBandwidthMbps(gen, width) {
     const knownGenGbps = {
         1: 2,
@@ -873,88 +841,6 @@ function calculatePcieBandwidthMbps(gen, width) {
         return null;
 
     return perLane * width;
-}
-
-function createUsageSummaryState() {
-    return {
-        version: USAGE_SUMMARY_VERSION,
-        updatedAt: Date.now(),
-        gpus: {},
-        collectorEnabled: false,
-    };
-}
-
-function parseUsageSummaryState(raw) {
-    let parsed;
-    try {
-        parsed = JSON.parse(raw);
-    } catch (_error) {
-        return null;
-    }
-
-    if (!parsed || typeof parsed !== 'object' || !parsed.gpus)
-        return null;
-
-    return {
-        version: USAGE_SUMMARY_VERSION,
-        updatedAt: Number(parsed.updatedAt) || Date.now(),
-        gpus: typeof parsed.gpus === 'object' && parsed.gpus !== null ? parsed.gpus : {},
-        collectorEnabled: parsed.collectorEnabled === true,
-    };
-}
-
-function readUsageSummaryFromEngineStorage() {
-    if (typeof cockpit?.file !== 'function')
-        return Promise.resolve(null);
-
-    return cockpit
-        .file(USAGE_STORAGE_PATH, { superuser: 'try' })
-        .read()
-        .then(raw => {
-            const text = `${raw || ''}`;
-            if (!text.trim())
-                return null;
-            return parseUsageSummaryState(text);
-        })
-        .catch(() => null);
-}
-
-async function readUsageSummaryFromStorage() {
-    const engineState = await readUsageSummaryFromEngineStorage();
-
-    return engineState || createUsageSummaryState();
-}
-
-function saveUsageSummaryToEngineStorage(state) {
-    const payload = JSON.stringify(state || createUsageSummaryState());
-    if (typeof cockpit?.file !== 'function')
-        return Promise.resolve(false);
-
-    return cockpit
-        .spawn(['mkdir', '-p', USAGE_STORAGE_DIR], { superuser: 'try' })
-        .then(() => cockpit.file(USAGE_STORAGE_PATH, { superuser: 'try' }).replace(payload))
-        .then(() => true)
-        .catch(() => false);
-}
-
-async function saveUsageSummaryToStorage(state) {
-    await saveUsageSummaryToEngineStorage(state || createUsageSummaryState());
-}
-
-function pruneUsageSummary(state, nowTs) {
-    const cutoff = dayKey(nowTs - (USAGE_MAX_DAYS * DAY_MS));
-    const gpus = state.gpus || {};
-    for (const id of Object.keys(gpus)) {
-        const profile = gpus[id] || {};
-        if (!profile.days)
-            continue;
-
-        for (const key of Object.keys(profile.days)) {
-            const day = Number(key);
-            if (!Number.isFinite(day) || day < cutoff)
-                delete profile.days[key];
-        }
-    }
 }
 
 async function queryNvidia(args) {
@@ -1670,361 +1556,6 @@ async function queryGpuDetails(existing = []) {
             ) || undefined,
         };
     });
-}
-
-function updateUsageSummaryUsage(prev, gpuStats, now) {
-    const state = {
-        ...(prev || createUsageSummaryState()),
-        updatedAt: now,
-    };
-    const bucket = usageBucketKey(now);
-    if (!Number.isFinite(bucket))
-        return state;
-
-    if (!state.gpus || typeof state.gpus !== 'object')
-        state.gpus = {};
-
-    const profiles = state.gpus;
-    for (const gpu of gpuStats) {
-        const utilizationGpu = Number.isFinite(gpu.utilizationGpu) ? gpu.utilizationGpu : null;
-        const utilizationMemory = Number.isFinite(gpu.utilizationMemory) ? gpu.utilizationMemory : null;
-        const temperature = Number.isFinite(gpu.temperature) ? gpu.temperature : null;
-
-        if (utilizationGpu == null && utilizationMemory == null && temperature == null)
-            continue;
-        if (!gpu.id)
-            continue;
-
-        const lastSampleMs = Number.isFinite(profiles[gpu.id]?.lastSampleTs) && now > profiles[gpu.id].lastSampleTs
-            ? Math.min(now - profiles[gpu.id].lastSampleTs, POLL_INTERVAL_MS * 3)
-            : POLL_INTERVAL_MS;
-        const safeSampleMs = Number.isFinite(lastSampleMs) && lastSampleMs > 0 ? lastSampleMs : POLL_INTERVAL_MS;
-        const profile = profiles[gpu.id] || {
-            id: gpu.id,
-            index: gpu.index,
-            name: gpu.name,
-            days: {},
-            lastSampleTs: now,
-            updatedAt: now,
-        };
-        profile.id = gpu.id;
-        profile.index = gpu.index;
-        profile.name = gpu.name;
-        profile.updatedAt = now;
-        profile.lastSampleTs = now;
-
-        const dayEntry = profile.days[bucket] || createUsageBucketSummary();
-        if (utilizationGpu != null) {
-            dayEntry.sum += utilizationGpu;
-            dayEntry.count += 1;
-        }
-        dayEntry.sampleMs += safeSampleMs;
-        if (utilizationGpu != null) {
-            dayEntry.activeSum += utilizationGpu * safeSampleMs;
-            dayEntry.activeMs += safeSampleMs;
-        }
-        if (utilizationMemory != null) {
-            dayEntry.utilizationMemorySum += utilizationMemory;
-            dayEntry.utilizationMemoryCount += 1;
-        }
-        if (temperature != null) {
-            dayEntry.temperatureSum += temperature;
-            dayEntry.temperatureCount += 1;
-        }
-        dayEntry.spanMs = Number.isFinite(dayEntry.spanMs) ? dayEntry.spanMs : USAGE_BUCKET_MS;
-        profile.days[bucket] = dayEntry;
-
-        profiles[gpu.id] = profile;
-    }
-
-    state.gpus = profiles;
-    pruneUsageSummary(state, now);
-
-    return state;
-}
-
-function createUsageBucketSummary() {
-    return {
-        sum: 0,
-        count: 0,
-        activeSum: 0,
-        sampleMs: 0,
-        activeMs: 0,
-        spanMs: USAGE_BUCKET_MS,
-        utilizationMemorySum: 0,
-        utilizationMemoryCount: 0,
-        temperatureSum: 0,
-        temperatureCount: 0,
-    };
-}
-
-function normalizeUsageBucket(entry) {
-    if (!entry || typeof entry !== 'object')
-        return createUsageBucketSummary();
-
-    const sum = Number.isFinite(entry.sum) ? entry.sum : 0;
-    const count = Number.isFinite(entry.count) ? entry.count : 0;
-    const sampleMs = Number.isFinite(entry.sampleMs) ? entry.sampleMs : count * POLL_INTERVAL_MS;
-    const dayBucketLike = (Number.isFinite(entry.sampleMs) && entry.sampleMs >= DAY_MS * 0.75)
-        || (Number.isFinite(entry.count) && entry.count >= (DAY_MS / POLL_INTERVAL_MS * 0.75));
-    const spanMs = Number.isFinite(entry.spanMs) && entry.spanMs > 0
-        ? entry.spanMs
-        : (dayBucketLike ? DAY_MS : USAGE_BUCKET_MS);
-
-    const hasActive = Number.isFinite(entry.activeSum) || Number.isFinite(entry.activeMs);
-    const hasUtilization = sum > 0 || count > 0;
-
-    const activeSum = hasActive
-        ? (Number.isFinite(entry.activeSum) ? entry.activeSum : 0)
-        : 0;
-    const activeMs = hasActive
-        ? (Number.isFinite(entry.activeMs) ? entry.activeMs : (hasUtilization ? sampleMs : 0))
-        : (hasUtilization ? sampleMs : 0);
-
-    return {
-        sum,
-        count,
-        activeSum,
-        sampleMs,
-        activeMs,
-        spanMs,
-        utilizationMemorySum: Number.isFinite(entry.utilizationMemorySum) ? entry.utilizationMemorySum : 0,
-        utilizationMemoryCount: Number.isFinite(entry.utilizationMemoryCount) ? entry.utilizationMemoryCount : 0,
-        temperatureSum: Number.isFinite(entry.temperatureSum) ? entry.temperatureSum : 0,
-        temperatureCount: Number.isFinite(entry.temperatureCount) ? entry.temperatureCount : 0,
-    };
-}
-
-function sumUsageBuckets(bucketMap, from, to) {
-    const total = {
-        sum: 0,
-        count: 0,
-        activeSum: 0,
-        sampleMs: 0,
-        activeMs: 0,
-        utilizationMemorySum: 0,
-        utilizationMemoryCount: 0,
-        temperatureSum: 0,
-        temperatureCount: 0,
-    };
-
-    if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to)
-        return total;
-
-    if (!bucketMap || typeof bucketMap !== 'object')
-        return total;
-
-    for (const key of Object.keys(bucketMap)) {
-        const dayTs = Number(key);
-        if (!Number.isFinite(dayTs))
-            continue;
-
-        const bucket = normalizeUsageBucket(bucketMap[dayTs]);
-        const bucketEnd = dayTs + bucket.spanMs;
-        const overlapStart = Math.max(dayTs, from);
-        const overlapEnd = Math.min(bucketEnd, to);
-        if (overlapEnd <= overlapStart)
-            continue;
-
-        const overlap = (overlapEnd - overlapStart) / bucket.spanMs;
-        total.sum += bucket.sum * overlap;
-        total.count += bucket.count * overlap;
-        total.activeSum += bucket.activeSum * overlap;
-        total.sampleMs += bucket.sampleMs * overlap;
-        total.activeMs += bucket.activeMs * overlap;
-        total.utilizationMemorySum += bucket.utilizationMemorySum * overlap;
-        total.utilizationMemoryCount += bucket.utilizationMemoryCount * overlap;
-        total.temperatureSum += bucket.temperatureSum * overlap;
-        total.temperatureCount += bucket.temperatureCount * overlap;
-    }
-
-    return total;
-}
-
-function addUsageTotals(target, source) {
-    target.sum += source.sum;
-    target.count += source.count;
-    target.activeSum += source.activeSum;
-    target.sampleMs += source.sampleMs;
-    target.activeMs += source.activeMs;
-    target.utilizationMemorySum += source.utilizationMemorySum;
-    target.utilizationMemoryCount += source.utilizationMemoryCount;
-    target.temperatureSum += source.temperatureSum;
-    target.temperatureCount += source.temperatureCount;
-}
-
-function buildUsageSummaryStats(accumulator) {
-    const avgUsage = accumulator.count > 0 ? accumulator.sum / accumulator.count : null;
-    const normalizedUsage = Number.isFinite(avgUsage) ? Math.max(0, Math.min(100, avgUsage)) : null;
-    const effectiveSampleMs = Number.isFinite(accumulator.sampleMs) && accumulator.sampleMs > 0
-        ? accumulator.sampleMs
-        : (Number.isFinite(accumulator.activeMs) && accumulator.activeMs > 0 ? accumulator.activeMs : null);
-    const hasUsageWindow = Number.isFinite(effectiveSampleMs);
-
-    return {
-        avg: accumulator.count > 0 ? accumulator.sum / accumulator.count : null,
-        inUsePercent: hasUsageWindow ? normalizedUsage : null,
-        inUseMs: hasUsageWindow && Number.isFinite(normalizedUsage) ? (normalizedUsage / 100) * effectiveSampleMs : null,
-        memoryAvg: accumulator.utilizationMemoryCount > 0 ? accumulator.utilizationMemorySum / accumulator.utilizationMemoryCount : null,
-        temperatureAvg: accumulator.temperatureCount > 0 ? accumulator.temperatureSum / accumulator.temperatureCount : null,
-    };
-}
-
-function newUsagePeriod() {
-    return {
-        sum: 0,
-        count: 0,
-        activeSum: 0,
-        sampleMs: 0,
-        activeMs: 0,
-        utilizationMemorySum: 0,
-        utilizationMemoryCount: 0,
-        temperatureSum: 0,
-        temperatureCount: 0,
-    };
-}
-
-function computeUsageSummary(profiles, nowTs, gpuIds) {
-    const safeProfiles = profiles && typeof profiles === 'object' ? profiles : {};
-    const ids = gpuIds.filter(Boolean);
-    const now = nowTs;
-    const startDay = now - USAGE_WINDOW_DAY;
-    const startWeek = now - USAGE_WINDOW_WEEK;
-    const startMonth = now - USAGE_WINDOW_MONTH;
-
-    const overall = {
-        day: null,
-        week: null,
-        month: null,
-        dayMemory: null,
-        weekMemory: null,
-        monthMemory: null,
-        dayTemperature: null,
-        weekTemperature: null,
-        monthTemperature: null,
-        dayInUseMs: null,
-        weekInUseMs: null,
-        monthInUseMs: null,
-        dayInUsePercent: null,
-        weekInUsePercent: null,
-        monthInUsePercent: null,
-    };
-    const gpuRows = [];
-    const dayKeys = [];
-    const monthKeys = [];
-    const today = dayKey(now);
-
-    for (let i = 0; i < 7; i += 1) {
-        dayKeys.push(today - ((6 - i) * DAY_MS));
-    }
-    for (let i = 0; i < 30; i += 1) {
-        monthKeys.push(today - ((29 - i) * DAY_MS));
-    }
-
-    const overallDay = newUsagePeriod();
-    const overallWeek = newUsagePeriod();
-    const overallMonth = newUsagePeriod();
-
-    const daySeries = dayKeys.map(key => {
-        let sum = 0;
-        let count = 0;
-        for (const gpuId of ids) {
-            const profile = safeProfiles[gpuId];
-            if (!profile || !profile.days)
-                continue;
-
-            const entry = sumUsageBuckets(profile.days, key, key + DAY_MS);
-            sum += entry.sum;
-            count += entry.count;
-        }
-
-        return {
-            t: key,
-            value: count ? sum / count : null,
-            label: formatDayLabel(key),
-        };
-    });
-
-    const monthSeries = monthKeys.map(key => {
-        let sum = 0;
-        let count = 0;
-
-        for (const gpuId of ids) {
-            const profile = safeProfiles[gpuId];
-            if (!profile || !profile.days)
-                continue;
-
-            const entry = sumUsageBuckets(profile.days, key, key + DAY_MS);
-            sum += entry.sum;
-            count += entry.count;
-        }
-
-        return {
-            t: key,
-            value: count ? sum / count : null,
-            label: formatDayLabel(key),
-        };
-    });
-
-    for (const id of ids) {
-        const profile = safeProfiles[id];
-        if (!profile)
-            continue;
-
-        const dayBuckets = sumUsageBuckets(profile.days, startDay, now);
-        const weekBuckets = sumUsageBuckets(profile.days, startWeek, now);
-        const monthBuckets = sumUsageBuckets(profile.days, startMonth, now);
-
-        addUsageTotals(overallDay, dayBuckets);
-        addUsageTotals(overallWeek, weekBuckets);
-        addUsageTotals(overallMonth, monthBuckets);
-
-        const daySummary = buildUsageSummaryStats(dayBuckets);
-        const weekSummary = buildUsageSummaryStats(weekBuckets);
-        const monthSummary = buildUsageSummaryStats(monthBuckets);
-        gpuRows.push({
-            id,
-            name: profile.name || id,
-            index: profile.index,
-            day: daySummary.avg,
-            week: weekSummary.avg,
-            month: monthSummary.avg,
-            dayMemory: daySummary.memoryAvg,
-            weekMemory: weekSummary.memoryAvg,
-            monthMemory: monthSummary.memoryAvg,
-            dayTemperature: daySummary.temperatureAvg,
-            weekTemperature: weekSummary.temperatureAvg,
-            monthTemperature: monthSummary.temperatureAvg,
-            dayInUseMs: daySummary.inUseMs,
-            weekInUseMs: weekSummary.inUseMs,
-            monthInUseMs: monthSummary.inUseMs,
-            dayInUsePercent: daySummary.inUsePercent,
-            weekInUsePercent: weekSummary.inUsePercent,
-            monthInUsePercent: monthSummary.inUsePercent,
-        });
-    }
-
-    const overallDaySummary = buildUsageSummaryStats(overallDay);
-    const overallWeekSummary = buildUsageSummaryStats(overallWeek);
-    const overallMonthSummary = buildUsageSummaryStats(overallMonth);
-
-    overall.day = overallDaySummary.avg;
-    overall.week = overallWeekSummary.avg;
-    overall.month = overallMonthSummary.avg;
-    overall.dayMemory = overallDaySummary.memoryAvg;
-    overall.weekMemory = overallWeekSummary.memoryAvg;
-    overall.monthMemory = overallMonthSummary.memoryAvg;
-    overall.dayTemperature = overallDaySummary.temperatureAvg;
-    overall.weekTemperature = overallWeekSummary.temperatureAvg;
-    overall.monthTemperature = overallMonthSummary.temperatureAvg;
-    overall.dayInUseMs = overallDaySummary.inUseMs;
-    overall.weekInUseMs = overallWeekSummary.inUseMs;
-    overall.monthInUseMs = overallMonthSummary.inUseMs;
-    overall.dayInUsePercent = overallDaySummary.inUsePercent;
-    overall.weekInUsePercent = overallWeekSummary.inUsePercent;
-    overall.monthInUsePercent = overallMonthSummary.inUsePercent;
-
-    return { overall, gpuRows, daySeries, monthSeries };
 }
 
 async function queryGpuBase() {
@@ -3211,52 +2742,6 @@ function ProcessesTable({ processes }) {
     );
 }
 
-function UsageSummaryTable({ summary, rows }) {
-    return (
-        <Table variant={TableVariant.compact} className="nvidia-usage-table">
-            <Thead>
-                <Tr>
-                    <Th>{_('Item')}</Th>
-                    <Th>{_('Last 24 hours')}</Th>
-                    <Th>{_('Last 7 days')}</Th>
-                    <Th>{_('Last 30 days')}</Th>
-                </Tr>
-            </Thead>
-            <Tbody>
-                <Tr>
-                    <Td>{_('GPU utilization')}</Td>
-                    <Td>{formatUsagePercent(summary.day)}</Td>
-                    <Td>{formatUsagePercent(summary.week)}</Td>
-                    <Td>{formatUsagePercent(summary.month)}</Td>
-                </Tr>
-                <Tr>
-                    <Td>{_('GPU memory utilization')}</Td>
-                    <Td>{formatUsagePercent(summary.dayMemory)}</Td>
-                    <Td>{formatUsagePercent(summary.weekMemory)}</Td>
-                    <Td>{formatUsagePercent(summary.monthMemory)}</Td>
-                </Tr>
-                <Tr>
-                    <Td>{_('GPU temperature')}</Td>
-                    <Td>{formatTemp(summary.dayTemperature)}</Td>
-                    <Td>{formatTemp(summary.weekTemperature)}</Td>
-                    <Td>{formatTemp(summary.monthTemperature)}</Td>
-                </Tr>
-                {rows.map(row => (
-                    <Tr key={row.id}>
-                        <Td>
-                            <div>{row.name}</div>
-                            <div className="nvidia-gpu-usage-sub">{_('GPU')} {row.index || ''}</div>
-                        </Td>
-                        <Td>{formatUsagePercent(row.day)}</Td>
-                        <Td>{formatUsagePercent(row.week)}</Td>
-                        <Td>{formatUsagePercent(row.month)}</Td>
-                    </Tr>
-                ))}
-            </Tbody>
-        </Table>
-    );
-}
-
 function App() {
     const [initialized, setInitialized] = useState(false);
     const [loading, setLoading] = useState(true);
@@ -3264,10 +2749,6 @@ function App() {
     const [histories, setHistories] = useState({});
     const [processes, setProcesses] = useState([]);
     const [stableProcessRows, setStableProcessRows] = useState([]);
-    const [usageState, setUsageState] = useState(() => createUsageSummaryState());
-    const [usageStateLoaded, setUsageStateLoaded] = useState(false);
-    const [usageCollectorEnabled, setUsageCollectorEnabled] = useState(false);
-    const [usageNowTs, setUsageNowTs] = useState(Date.now());
     const [error, setError] = useState(null);
     const [processError, setProcessError] = useState(null);
     const [activeTab, setActiveTab] = useState('gpus');
@@ -3310,9 +2791,6 @@ function App() {
 
     const normalizedProcessRows = processSummary.rows;
 
-    const usageSummary = useMemo(() => computeUsageSummary(usageState.gpus || {}, usageNowTs, sortedGpus.map(gpu => gpu.id)),
-        [usageState, sortedGpus, usageNowTs]);
-
     const update = async (force = false) => {
         const now = Date.now();
         if (!force && now - lastTs.current < POLL_INTERVAL_MS)
@@ -3346,13 +2824,6 @@ function App() {
 
             setGpus(gpuStats);
             setProcesses(procStats);
-            if (usageCollectorEnabled) {
-                const restored = await readUsageSummaryFromStorage();
-                setUsageState(prev => restored || prev);
-            } else {
-                setUsageState(prev => updateUsageSummaryUsage(prev, gpuStats, now));
-            }
-            setUsageNowTs(now);
             setError(null);
 
             setHistories(prev => {
@@ -3387,31 +2858,6 @@ function App() {
             }
         }
     };
-
-    useEffect(() => {
-        let mounted = true;
-        (async () => {
-            const restored = await readUsageSummaryFromStorage();
-            if (!mounted)
-                return;
-            setUsageState(restored);
-            setUsageCollectorEnabled(Boolean(restored?.collectorEnabled));
-            setUsageStateLoaded(true);
-        })();
-
-        return () => {
-            mounted = false;
-        };
-    }, []);
-
-    useEffect(() => {
-        if (!usageStateLoaded)
-            return;
-        if (usageCollectorEnabled)
-            return;
-
-        void saveUsageSummaryToStorage(usageState);
-    }, [usageState, usageStateLoaded, usageCollectorEnabled]);
 
     useEffect(() => {
         let running = true;
@@ -3521,15 +2967,6 @@ function App() {
             {loading
                 ? <div className="nvidia-gpu-loading"><Spinner isInline /> {_('Updating...')}</div>
                 : null}
-
-            {usageSummary.overall && sortedGpus.length > 0 ? (
-                <Card>
-                    <CardTitle>{_('Historical usage summary')}</CardTitle>
-                    <CardBody>
-                        <UsageSummaryTable summary={usageSummary.overall} rows={usageSummary.gpuRows} />
-                    </CardBody>
-                </Card>
-            ) : null}
 
             <Tabs
                 activeKey={activeTab}

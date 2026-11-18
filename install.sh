@@ -19,7 +19,7 @@ Usage: sudo ./install.sh [--build-user USER] [--dir PATH] [--ref COMMIT] [--repo
 Installs from this local checkout; --ref downloads the specified immutable commit.
 --dir selects a root-owned plugin directory. Use the same --dir for uninstall.
 --restart-cockpit restarts existing Cockpit units after install/uninstall.
---uninstall removes the plugin, collector, service, account and usage data.
+--uninstall removes the plugin and cleans up previous installations.
 HELP
 }
 while (($#)); do
@@ -135,19 +135,12 @@ trap 'rm -rf -- "$WORK" "$STAGE"' EXIT
 chmod 0700 "$STAGE"
 mkdir "$STAGE/dist" "$STAGE/plugin"
 runuser -u "$BUILD_USER" -- tar -chf - -C "$DIST" . | tar -xf - -C "$STAGE/dist" --no-same-owner --no-same-permissions
-runuser -u "$BUILD_USER" -- tar -chf - -C "$WORK/plugin" index.html cockpit-gpu-boot.js po.js cockpit-gpu-usage-collector.py cockpit-gpu-usage-collector.service \
+runuser -u "$BUILD_USER" -- tar -chf - -C "$WORK/plugin" index.html cockpit-gpu-boot.js po.js \
   | tar -xf - -C "$STAGE/plugin" --no-same-owner --no-same-permissions
 [[ -z $(find "$STAGE" -mindepth 1 ! -type f ! -type d -print -quit) ]] || { echo 'ERROR: non-regular file in build output' >&2; exit 1; }
 for f in manifest.json cockpit-gpu.js cockpit-gpu.css; do [[ -f $STAGE/dist/$f ]] || { echo "ERROR: missing build output $f" >&2; exit 1; }; done
-install -d -o root -g root -m 0755 "$DIR" "$LIBEXEC"
+install -d -o root -g root -m 0755 "$DIR"
 rsync -r --delete --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r --chown=root:root "$STAGE/dist/" "$DIR/"
 for f in index.html cockpit-gpu-boot.js po.js; do install -o root -g root -m 0644 "$STAGE/plugin/$f" "$DIR/$f"; done
-install -o root -g root -m 0755 "$STAGE/plugin/cockpit-gpu-usage-collector.py" "$LIBEXEC/cockpit-gpu-usage-collector.py"
-install -o root -g root -m 0644 "$STAGE/plugin/cockpit-gpu-usage-collector.service" "$UNIT"
-if ! id cockpit-gpu >/dev/null 2>&1; then useradd --system --no-create-home --shell /usr/sbin/nologin cockpit-gpu; fi
-install -d -o cockpit-gpu -g cockpit-gpu -m 0755 "$STATE"
-if [[ -f $STATE/usage-summary.json && ! -L $STATE/usage-summary.json ]]; then chown cockpit-gpu:cockpit-gpu "$STATE/usage-summary.json"; fi
-systemctl daemon-reload
-systemctl enable --now cockpit-gpu-usage-collector.service
 restart_cockpit
 echo "Installed in $DIR"

@@ -105,10 +105,6 @@
   box-shadow: var(--pf-t--global--box-shadow--sm);
 }
 
-.nvidia-gpu-period-card {
-  width: 100%;
-}
-
 .nvidia-gpu-card__title {
   gap: var(--pf-t--global--spacer--sm);
   justify-content: flex-start;
@@ -591,25 +587,6 @@
   color: var(--pf-t--global--text--color--subtle);
   font-size: var(--pf-t--global--font--size--sm);
   overflow-wrap: anywhere;
-}
-
-.nvidia-usage-table-wrap {
-  margin-top: var(--pf-t--global--spacer--sm);
-  overflow-x: auto;
-}
-
-.nvidia-usage-table {
-  min-width: 100%;
-}
-
-.nvidia-gpu-usage-sub {
-  color: var(--pf-t--global--text--color--subtle);
-  font-size: var(--pf-t--global--font--size--sm);
-}
-
-.nvidia-gpu-usage-trend {
-  margin-top: var(--pf-t--global--spacer--md);
-  margin-bottom: var(--pf-t--global--spacer--md);
 }
 
 .nvidia-gpu-empty,
